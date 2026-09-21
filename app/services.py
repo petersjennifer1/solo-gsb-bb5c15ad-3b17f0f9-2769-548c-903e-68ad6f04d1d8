@@ -13,6 +13,7 @@ from . import condensation as cond
 from . import excursions as exc
 from . import incidents as inc
 from . import propagation as prop
+from . import recovery as rec
 from . import segmentation as seg
 from . import timeline as tl
 from .config import settings
@@ -33,6 +34,8 @@ from .schemas import (
     PropagationLagOut,
     PropagationOut,
     ReadingIn,
+    RecoveryBaselineOut,
+    RecoveryOut,
     SegmentOut,
     SegmentationOut,
     TimelineOut,
@@ -706,6 +709,75 @@ def build_case_condensation_risk(
             )
             for w in windows
         ],
+    )
+
+
+# ---------- 展柜扰动恢复分析 ----------
+
+
+def build_case_recovery(
+    db: Session,
+    device_sn: str,
+    event_ts: dt.datetime,
+    baseline_seconds: float,
+    horizon_seconds: float,
+    min_baseline_samples: int,
+    temp_tolerance: float,
+    humidity_tolerance: float,
+    hold_seconds: float,
+    max_gap_seconds: float,
+) -> RecoveryOut:
+    """扰动恢复分析（只读计算，不落库）。
+
+    设备没有任何读数时由调用方通过 ``_case_has_readings`` 判 404；
+    基线样本不足时透传 :class:`recovery.InsufficientBaselineSamples`
+    由接口层判 422。
+    """
+    samples = _load_samples(db, device_sn)
+    result = rec.analyze_recovery(
+        samples,
+        event_ts=event_ts,
+        baseline_seconds=baseline_seconds,
+        horizon_seconds=horizon_seconds,
+        min_baseline_samples=min_baseline_samples,
+        temp_tolerance=temp_tolerance,
+        humidity_tolerance=humidity_tolerance,
+        hold_seconds=hold_seconds,
+        max_gap_seconds=max_gap_seconds,
+    )
+    return RecoveryOut(
+        device_sn=device_sn,
+        event_ts=result.event_ts,
+        horizon_end=result.horizon_end,
+        baseline_seconds=baseline_seconds,
+        horizon_seconds=horizon_seconds,
+        min_baseline_samples=min_baseline_samples,
+        temp_tolerance=temp_tolerance,
+        humidity_tolerance=humidity_tolerance,
+        hold_seconds=hold_seconds,
+        max_gap_seconds=max_gap_seconds,
+        baseline_sample_count=result.baseline.sample_count,
+        post_event_sample_count=result.post_event_sample_count,
+        baseline=RecoveryBaselineOut(
+            window_start=result.baseline.window_start,
+            window_end=result.baseline.window_end,
+            sample_count=result.baseline.sample_count,
+            temperature=result.baseline.temperature,
+            humidity=result.baseline.humidity,
+            temperature_low=result.baseline.temperature_low,
+            temperature_high=result.baseline.temperature_high,
+            humidity_low=result.baseline.humidity_low,
+            humidity_high=result.baseline.humidity_high,
+        ),
+        recovered=result.recovered,
+        band_enter_ts=result.band_enter_ts,
+        recovered_at=result.recovered_at,
+        recovery_seconds=result.recovery_seconds,
+        max_temperature_deviation=result.max_temperature_deviation,
+        max_temperature_deviation_ts=result.max_temperature_deviation_ts,
+        max_humidity_deviation=result.max_humidity_deviation,
+        max_humidity_deviation_ts=result.max_humidity_deviation_ts,
+        reason=result.reason,
     )
 
 

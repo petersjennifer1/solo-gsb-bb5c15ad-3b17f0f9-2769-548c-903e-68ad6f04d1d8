@@ -398,5 +398,78 @@ class HealthOut(BaseModel):
     db: str
 
 
+RecoveryNotRecoveredReason = Literal[
+    "no_post_event_readings",        # 事件后观察窗内没有任何读数
+    "never_simultaneously_in_band",  # 从未形成两维同时在带内的正长度区间
+    "dwell_interrupted",             # 两维曾同时在带，但出带或断档中断了保持计时
+    "dwell_incomplete_at_horizon",   # 观察结束时仍在带内，但连续保持未满 hold_seconds
+]
+
+
+class RecoveryBaselineOut(BaseModel):
+    window_start: dt.datetime = Field(
+        ..., description="基线窗口起点（event_ts − baseline_seconds，UTC）"
+    )
+    window_end: dt.datetime = Field(..., description="基线窗口终点（即 event_ts，UTC）")
+    sample_count: int = Field(..., description="基线窗口（含两端）内参与中位数的读数数量")
+    temperature: float = Field(..., description="基线温度中位数（°C）")
+    humidity: float = Field(..., description="基线湿度中位数（%RH）")
+    temperature_low: float = Field(..., description="温度容差带下限 = 中位数 − temp_tolerance（°C，含）")
+    temperature_high: float = Field(..., description="温度容差带上限 = 中位数 + temp_tolerance（°C，含）")
+    humidity_low: float = Field(..., description="湿度容差带下限 = 中位数 − humidity_tolerance（%RH，含）")
+    humidity_high: float = Field(..., description="湿度容差带上限 = 中位数 + humidity_tolerance（%RH，含）")
+
+
+class RecoveryOut(BaseModel):
+    device_sn: str
+    event_ts: dt.datetime = Field(..., description="扰动事件时刻（UTC）")
+    horizon_end: dt.datetime = Field(
+        ..., description="事件后观察窗终点（event_ts + horizon_seconds，UTC）"
+    )
+    baseline_seconds: float = Field(..., description="事件前基线窗口长度（秒）")
+    horizon_seconds: float = Field(..., description="事件后观察窗长度（秒）")
+    min_baseline_samples: int = Field(..., description="基线最少读数数量要求")
+    temp_tolerance: float = Field(..., description="温度容差半宽（°C，含边界）")
+    humidity_tolerance: float = Field(..., description="湿度容差半宽（%RH，含边界）")
+    hold_seconds: float = Field(
+        ..., description="两维同时在带内所需的连续保持秒数（含等于）"
+    )
+    max_gap_seconds: float = Field(
+        ..., description="允许的最大相邻读数间隔（秒）；超过即中断保持计时"
+    )
+    baseline_sample_count: int = Field(..., description="基线窗口内实际读数数量")
+    post_event_sample_count: int = Field(
+        ..., description="事件后观察窗 (event_ts, event_ts + horizon_seconds] 内读数数量"
+    )
+    baseline: RecoveryBaselineOut
+    recovered: bool = Field(..., description="两维是否曾同时连续在带内保持满 hold_seconds")
+    band_enter_ts: dt.datetime | None = Field(
+        None,
+        description="成功保持段的起点：两维同时进入容差带的精确插值时刻（未恢复为 null）",
+    )
+    recovered_at: dt.datetime | None = Field(
+        None,
+        description="恢复确认时刻 = band_enter_ts + hold_seconds（未恢复为 null）",
+    )
+    recovery_seconds: float | None = Field(
+        None, description="恢复用时（recovered_at − event_ts，秒；未恢复为 null）"
+    )
+    max_temperature_deviation: float | None = Field(
+        None, description="事件后温度相对基线中位数的最大绝对偏差（°C）；无事件后读数为 null"
+    )
+    max_temperature_deviation_ts: dt.datetime | None = Field(
+        None, description="最大温度偏差对应的读数时刻（并列取最早）；无事件后读数为 null"
+    )
+    max_humidity_deviation: float | None = Field(
+        None, description="事件后湿度相对基线中位数的最大绝对偏差（%RH）；无事件后读数为 null"
+    )
+    max_humidity_deviation_ts: dt.datetime | None = Field(
+        None, description="最大湿度偏差对应的读数时刻（并列取最早）；无事件后读数为 null"
+    )
+    reason: RecoveryNotRecoveredReason | None = Field(
+        None, description="未恢复原因；已恢复时为 null"
+    )
+
+
 IngestSummary.model_rebuild()
 ReplayPreviewResponse.model_rebuild()

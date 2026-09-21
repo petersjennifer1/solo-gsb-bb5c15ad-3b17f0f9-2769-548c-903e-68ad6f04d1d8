@@ -10,7 +10,9 @@
 **分维偏移校正时间线**（只读），以及基于固定步长插值与正负时滞
 皮尔逊相关的**跨展柜环境传播分析**（propagation，只读），以及基于
 Magnus 公式露点与表面温度冷凝裕量的**冷凝风险窗口**检测
-（condensation risk，只读）。
+（condensation risk，只读），以及**展柜扰动恢复分析**（recovery）：
+以事件前窗口温湿度中位数为基线，事件后按分段线性曲线精确求双维
+进入/离开容差带交点，两维同时在带连续保持达标方判恢复（只读）。
 
 ---
 
@@ -258,6 +260,103 @@ Td = 243.12·γ/(17.62 − γ)
 返回 `422`；展柜没有读数返回 `404`；过滤后为空范围返回 `200` 与空窗口
 列表（`sample_count` 含湿度为 0 的无效读数）。
 
+### 12. 展柜扰动恢复分析
+
+`GET /api/v1/cases/{sn}/recovery` 给定一次扰动的**事件时刻**
+`event_ts`，回答“展柜什么时候算从扰动中恢复”（只读，不写库、不改
+版本号）：
+
+1. **基线**：取事件前窗口
+   `[event_ts − baseline_seconds, event_ts]`（**含两端**，恰好落在
+   `event_ts` 的读数归入基线）内温度、湿度各自的**中位数**（偶数样本
+   取中间两数均值），容差带为
+   `[中位数 − 容差, 中位数 + 容差]`（温度 `temp_tolerance`、湿度
+   `humidity_tolerance`，边界**含等于**）。窗口内读数少于
+   `min_baseline_samples` 时返回 `422` 并给出实际/要求样本数与窗口。
+2. **事件后曲线**：取 `(event_ts, event_ts + horizon_seconds]`
+   （左开右闭）内的读数视为**分段线性**曲线，对每个维度的每条采样
+   区间精确求出入带/出带的**线性插值交点**，不做阶梯近似。
+3. **恢复判定**：仅当温度、湿度**同时**在带内，并沿**未断开**的曲线
+   连续保持 **≥** `hold_seconds`（含等于）时才判定恢复。任一维出带、
+   或相邻读数间隔**大于** `max_gap`（恰好等于仍连续）都会**中断并
+   重新计时**；断档两侧的在带区间绝不合并。
+4. **恢复时刻**：`recovered_at = band_enter_ts + hold_seconds`，
+   其中 `band_enter_ts` 是成功保持段的起点——两维各自入带交点中
+   **更晚**的一个；`recovery_seconds = recovered_at − event_ts`。
+5. **事件后最大偏差**：分别给出事件后温度、湿度读数相对基线中位数
+   的**最大绝对偏差**及其读数时刻（分段线性曲线的极值必落在读数
+   时刻，并列取最早）；无事件后读数时偏差字段为 `null`。
+
+未恢复时 `recovered=false`，`recovered_at` / `recovery_seconds` /
+`band_enter_ts` 为 `null`，并给出 `reason`：
+
+| reason | 含义 |
+| --- | --- |
+| `no_post_event_readings` | 事件后观察窗内没有任何读数 |
+| `never_simultaneously_in_band` | 从未形成两维同时在带内的正长度区间（仅单点恰好落在边界不算） |
+| `dwell_interrupted` | 两维曾同时在带，但出带或断档终结了保持计时（末点孤立在带内亦然） |
+| `dwell_incomplete_at_horizon` | 最后一段同时在带连续延伸到观测末点，但保持时间不足 `hold_seconds` |
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `event_ts` | 是 | — | 扰动事件时刻（ISO8601，含；基线窗口止于该时刻） |
+| `baseline_seconds` | 是 | — | 事件前基线窗口长度（秒，**> 0**） |
+| `horizon_seconds` | 是 | — | 事件后观察窗长度（秒，**> 0**） |
+| `min_baseline_samples` | 是 | — | 基线窗口内最少读数数量（**≥ 1**），不足返回 `422` |
+| `temp_tolerance` | 是 | — | 温度容差半宽（°C，**> 0**，含边界） |
+| `humidity_tolerance` | 是 | — | 湿度容差半宽（%RH，**> 0**，含边界） |
+| `hold_seconds` | 是 | — | 两维同时在带所需的连续保持秒数（**> 0**，含等于） |
+| `max_gap` | 否 | `600` | 允许的最大相邻读数间隔（秒，0 < x ≤ 86400），超过即中断计时 |
+
+```bash
+curl 'http://localhost:8080/api/v1/cases/CASE-007/recovery?event_ts=2026-09-01T09:00:00%2B08:00&baseline_seconds=3600&horizon_seconds=7200&min_baseline_samples=3&temp_tolerance=1.0&humidity_tolerance=2.0&hold_seconds=300&max_gap=600'
+```
+
+响应示例（事件后温湿度先冲出容差带、随后线性回到基线并稳定保持）：
+
+```json
+{
+  "device_sn": "CASE-007",
+  "event_ts": "2026-09-01T01:00:00Z",
+  "horizon_end": "2026-09-01T03:00:00Z",
+  "baseline_seconds": 3600.0,
+  "horizon_seconds": 7200.0,
+  "min_baseline_samples": 3,
+  "temp_tolerance": 1.0,
+  "humidity_tolerance": 2.0,
+  "hold_seconds": 300.0,
+  "max_gap_seconds": 600.0,
+  "baseline_sample_count": 5,
+  "post_event_sample_count": 5,
+  "baseline": {
+    "window_start": "2026-09-01T00:00:00Z",
+    "window_end": "2026-09-01T01:00:00Z",
+    "sample_count": 5,
+    "temperature": 20.0,
+    "humidity": 50.0,
+    "temperature_low": 19.0,
+    "temperature_high": 21.0,
+    "humidity_low": 48.0,
+    "humidity_high": 52.0
+  },
+  "recovered": true,
+  "band_enter_ts": "2026-09-01T01:07:30Z",
+  "recovered_at": "2026-09-01T01:12:30Z",
+  "recovery_seconds": 750.0,
+  "max_temperature_deviation": 4.0,
+  "max_temperature_deviation_ts": "2026-09-01T01:01:00Z",
+  "max_humidity_deviation": 8.0,
+  "max_humidity_deviation_ts": "2026-09-01T01:01:00Z",
+  "reason": null
+}
+```
+
+`band_enter_ts` / `recovered_at` 均为分段线性曲线交点反解的**精确
+时刻**；任一正数参数非正、`min_baseline_samples < 1`、`max_gap` 超
+上限、`event_ts` 非法均返回 `422`；基线样本不足返回 `422` 并在
+`detail` 中给出实际样本数、要求数量与基线窗口；展柜没有读数返回
+`404`。接口**只读**：不写库、不改版本号。
+
 ---
 
 ## 接口一览
@@ -272,6 +371,7 @@ Td = 243.12·γ/(17.62 − γ)
 | GET  | `/api/v1/cases/{sn}/exposure-budget` | 累计越界剂量预算：窗末累计量、剩余额度与首次达到预算的精确时刻 |
 | GET  | `/api/v1/cases/{sn}/calibrated-timeline` | 锚点参考值校正的只读时间线：分维偏移线性插值，支持 `start` / `end` 过滤 |
 | GET  | `/api/v1/cases/{sn}/condensation-risk` | 冷凝风险：Magnus 露点 + 表面温度裕量，线性插值精确窗口、断档/零湿度断开 |
+| GET  | `/api/v1/cases/{sn}/recovery` | 扰动恢复：事件前中位数基线 + 事件后双维容差带精确交点，连续保持达标方判恢复（只读） |
 | GET  | `/api/v1/incidents` | 跨展柜共模突变：非基线段首候选窗 + 全局最优互不重叠选择 |
 | GET  | `/api/v1/propagation` | 跨展柜环境传播：重叠时段固定步长插值 + 正负时滞皮尔逊相关（只读） |
 | POST | `/api/v1/anchors` | 登记/更新锚点并重放 |
@@ -744,4 +844,10 @@ start/end 过滤、无有效锚点偏移为 0、未对齐锚点忽略、只读�
 精确性、阈值含等于、相接子区间合并与最低裕量（并列取最早）、`max_gap`
 断档与等于连续、湿度为 0 强制断开且不计入露点、`min_duration` 含等于
 过滤、断档两侧窗口不合并、参数校验 422、空范围 200、未知展柜 404、
-确定性）。
+确定性），以及
+**扰动恢复**（事件前窗口含两端与偶数样本中位数、样本不足 422 明细、
+事件后窗口左开右闭、双维容差带分段线性进入/离开交点精确性与含边界、
+两维入带取更晚交点、`hold_seconds` 含等于确认与 `recovered_at` 反解、
+任一维出带即中断重新计时、`max_gap` 超限中断与等于连续、四类未恢复
+原因、事件后分维最大偏差与并列取最早、正数/时间参数 422、无读数 404、
+只读不改库、确定性）。

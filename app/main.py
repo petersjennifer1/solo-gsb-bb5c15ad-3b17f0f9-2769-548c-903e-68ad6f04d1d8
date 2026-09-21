@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from . import services
 from .database import CaseState, SessionLocal, init_db, to_utc
 from .excursions import Thresholds
+from .recovery import InsufficientBaselineSamples
 from .schemas import (
     AnchorIn,
     AnchorOut,
@@ -28,6 +29,7 @@ from .schemas import (
     IngestSummary,
     PropagationOut,
     ReadingIn,
+    RecoveryOut,
     ReplayPreviewResponse,
     SegmentationOut,
     TimelineOut,
@@ -61,9 +63,12 @@ app = FastAPI(
         "分维偏移校正时间线（只读）；并支持跨展柜共模突变检测与基于"
         "固定步长插值、正负时滞皮尔逊相关的跨展柜环境传播分析（只读）；"
         "并基于 Magnus 公式露点与表面温度的冷凝裕量提供冷凝风险窗口"
-        "检测（线性插值阈值交点、断档/零湿度断开、最短持续过滤，只读）。"
+        "检测（线性插值阈值交点、断档/零湿度断开、最短持续过滤，只读）；"
+        "并提供展柜扰动恢复分析：以事件前温湿度中位数为基线，事件后按分段"
+        "线性曲线精确求双维进入/离开容差带交点，两维同时在带连续保持达标"
+        "方判恢复（只读）。"
     ),
-    version="1.6.0",
+    version="1.7.0",
     lifespan=lifespan,
 )
 
@@ -437,6 +442,71 @@ def get_condensation_risk(
     if out is None:
         raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")
     return out
+
+
+# ---------- 展柜扰动恢复分析 ----------
+
+
+@app.get(
+    "/api/v1/cases/{device_sn}/recovery",
+    response_model=RecoveryOut,
+    tags=["cases"],
+    summary="扰动恢复：事件前中位数基线 + 事件后双维容差带精确进入/离开交点",
+)
+def get_recovery(
+    device_sn: str,
+    event_ts: dt.datetime = Query(..., description="扰动事件时刻（含），ISO8601；基线窗口止于该时刻"),
+    baseline_seconds: float = Query(..., gt=0.0, description="事件前基线窗口长度（秒，必须为正）"),
+    horizon_seconds: float = Query(..., gt=0.0, description="事件后观察窗长度（秒，必须为正）"),
+    min_baseline_samples: int = Query(
+        ..., ge=1, description="基线窗口内最少读数数量（含）；不足返回 422"
+    ),
+    temp_tolerance: float = Query(
+        ..., gt=0.0, description="温度容差半宽（°C，必须为正，含边界）"
+    ),
+    humidity_tolerance: float = Query(
+        ..., gt=0.0, description="湿度容差半宽（%RH，必须为正，含边界）"
+    ),
+    hold_seconds: float = Query(
+        ..., gt=0.0, description="两维同时在带内所需的连续保持秒数（必须为正，含等于）"
+    ),
+    max_gap: float = Query(
+        600.0,
+        gt=0.0,
+        le=86400.0,
+        description="允许的最大相邻读数间隔（秒）；超过即中断保持计时（恰好等于仍连续）",
+    ),
+    db: Session = Depends(get_db),
+):
+    event_utc = _parse_ts(event_ts)
+
+    if not services._case_has_readings(db, device_sn):
+        raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")
+
+    try:
+        return services.build_case_recovery(
+            db,
+            device_sn,
+            event_ts=event_utc,
+            baseline_seconds=baseline_seconds,
+            horizon_seconds=horizon_seconds,
+            min_baseline_samples=min_baseline_samples,
+            temp_tolerance=temp_tolerance,
+            humidity_tolerance=humidity_tolerance,
+            hold_seconds=hold_seconds,
+            max_gap_seconds=max_gap,
+        )
+    except InsufficientBaselineSamples as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": str(exc),
+                "baseline_sample_count": exc.baseline_sample_count,
+                "min_baseline_samples": exc.min_baseline_samples,
+                "baseline_window_start": exc.window_start.isoformat(),
+                "baseline_window_end": exc.window_end.isoformat(),
+            },
+        )
 
 
 # ---------- 跨展柜共模突变 ----------
