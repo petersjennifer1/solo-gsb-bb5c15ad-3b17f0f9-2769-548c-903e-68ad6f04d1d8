@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from . import services
 from .database import CaseState, SessionLocal, init_db, to_utc
 from .excursions import Thresholds
+from .recovery import InsufficientBaseline
 from .schemas import (
     AnchorIn,
     AnchorOut,
@@ -28,6 +29,7 @@ from .schemas import (
     IngestSummary,
     PropagationOut,
     ReadingIn,
+    RecoveryOut,
     ReplayPreviewResponse,
     SegmentationOut,
     TimelineOut,
@@ -61,9 +63,11 @@ app = FastAPI(
         "分维偏移校正时间线（只读）；并支持跨展柜共模突变检测与基于"
         "固定步长插值、正负时滞皮尔逊相关的跨展柜环境传播分析（只读）；"
         "并基于 Magnus 公式露点与表面温度的冷凝裕量提供冷凝风险窗口"
-        "检测（线性插值阈值交点、断档/零湿度断开、最短持续过滤，只读）。"
+        "检测（线性插值阈值交点、断档/零湿度断开、最短持续过滤，只读）；"
+        "并提供以事件前中位数为基线、双维容差带精确交点与连续在带"
+        "计时的展柜扰动恢复分析（只读）。"
     ),
-    version="1.6.0",
+    version="1.7.0",
     lifespan=lifespan,
 )
 
@@ -434,6 +438,92 @@ def get_condensation_risk(
         max_gap_seconds,
         min_duration_seconds,
     )
+    if out is None:
+        raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")
+    return out
+
+
+# ---------- 扰动恢复分析 ----------
+
+
+@app.get(
+    "/api/v1/cases/{device_sn}/recovery",
+    response_model=RecoveryOut,
+    tags=["cases"],
+    summary="扰动恢复分析：事件前中位数基线 + 双维容差带精确交点，连续在带达 hold 判定恢复",
+)
+def get_recovery(
+    device_sn: str,
+    event_ts: dt.datetime = Query(
+        ..., description="扰动事件时刻（含），ISO8601；基线窗与恢复窗以此为界"
+    ),
+    baseline_seconds: float = Query(
+        ...,
+        gt=0.0,
+        le=31536000.0,
+        description="事件前基线窗口长度（秒，正数）：取 [event_ts − baseline_seconds, event_ts] 内读数",
+    ),
+    horizon_seconds: float = Query(
+        ...,
+        gt=0.0,
+        le=31536000.0,
+        description="事件后恢复观察窗口长度（秒，正数）：观察 [event_ts, event_ts + horizon_seconds]",
+    ),
+    min_baseline_samples: int = Query(
+        ...,
+        ge=1,
+        le=1_000_000,
+        description="基线窗口要求的最少读数数量（正整数）；不足时返回 422",
+    ),
+    temp_tolerance: float = Query(
+        ...,
+        gt=0.0,
+        description="温度容差（°C，正数）：容差带 [基线温度 − 容差, 基线温度 + 容差]，含边界",
+    ),
+    humidity_tolerance: float = Query(
+        ...,
+        gt=0.0,
+        le=100.0,
+        description="湿度容差（%RH，正数，不超过 100）：容差带 [基线湿度 − 容差, 基线湿度 + 容差]，含边界",
+    ),
+    hold_seconds: float = Query(
+        ...,
+        ge=0.0,
+        le=31536000.0,
+        description="两维同时连续在带内需达到的秒数（非负）；任一维出带或相邻读数间隔超过 max_gap 即重新计时",
+    ),
+    max_gap: float = Query(
+        600.0,
+        gt=0.0,
+        le=86400.0,
+        description="允许的最大采样间隔（秒）；超过则曲线断开并重新计时，未知区间不参与恢复",
+    ),
+    db: Session = Depends(get_db),
+):
+    event_ts_utc = _parse_ts(event_ts)
+
+    try:
+        out = services.build_case_recovery(
+            db,
+            device_sn,
+            event_ts=event_ts_utc,
+            baseline_seconds=baseline_seconds,
+            horizon_seconds=horizon_seconds,
+            min_baseline_samples=min_baseline_samples,
+            temp_tolerance=temp_tolerance,
+            humidity_tolerance=humidity_tolerance,
+            hold_seconds=hold_seconds,
+            max_gap_seconds=max_gap,
+        )
+    except InsufficientBaseline as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": str(exc),
+                "baseline_sample_count": exc.sample_count,
+                "min_baseline_samples": exc.min_required,
+            },
+        )
     if out is None:
         raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")
     return out

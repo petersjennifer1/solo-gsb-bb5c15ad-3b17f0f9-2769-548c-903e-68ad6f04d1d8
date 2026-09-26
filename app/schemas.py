@@ -393,6 +393,76 @@ class CondensationRiskOut(BaseModel):
     windows: list[CondensationWindowOut]
 
 
+class RecoveryBaselineOut(BaseModel):
+    window_start: dt.datetime = Field(
+        ..., description="基线窗口起点（event_ts − baseline_seconds，UTC，含端点）"
+    )
+    window_end: dt.datetime = Field(..., description="基线窗口终点（event_ts，含端点）")
+    sample_count: int = Field(..., description="基线窗口内参与中位数计算的读数数量")
+    temperature: float = Field(..., description="基线温度：窗口内温度读数的中位数（°C）")
+    humidity: float = Field(..., description="基线湿度：窗口内湿度读数的中位数（%RH）")
+
+
+class RecoveryOut(BaseModel):
+    device_sn: str
+    event_ts: dt.datetime = Field(..., description="扰动事件时刻（UTC）")
+    horizon_end_ts: dt.datetime = Field(
+        ..., description="恢复观察窗口终点（event_ts + horizon_seconds，UTC）"
+    )
+    baseline_seconds: float = Field(..., description="生效的事件前基线窗口长度（秒）")
+    horizon_seconds: float = Field(..., description="生效的事件后恢复观察窗口长度（秒）")
+    min_baseline_samples: int = Field(..., description="基线窗口要求的最少读数数量")
+    temp_tolerance: float = Field(
+        ..., description="温度容差（°C）：容差带为 [基线温度 − 容差, 基线温度 + 容差]，含边界"
+    )
+    humidity_tolerance: float = Field(
+        ..., description="湿度容差（%RH）：容差带为 [基线湿度 − 容差, 基线湿度 + 容差]，含边界"
+    )
+    hold_seconds: float = Field(
+        ..., description="两维同时连续在带内需达到的秒数（中断即重新计时）"
+    )
+    max_gap_seconds: float = Field(
+        ..., description="允许的最大相邻读数间隔（秒）；超过即断开并重新计时"
+    )
+    baseline: RecoveryBaselineOut
+    post_sample_count: int = Field(
+        ..., description="事件后恢复观察窗口（含端点）内的读数数量"
+    )
+    recovered: bool = Field(..., description="事件后窗口内是否出现满足 hold 的两维同时在带")
+    recovered_at: dt.datetime | None = Field(
+        None,
+        description=(
+            "恢复时刻：两维同时在容差带内连续达到 hold_seconds 的精确时刻"
+            "（线性插值交点进入 + hold 反解）；未恢复为 null"
+        ),
+    )
+    recovery_seconds: float | None = Field(
+        None, description="恢复耗时（recovered_at − event_ts，秒）；未恢复为 null"
+    )
+    max_temp_deviation: float | None = Field(
+        None, description="事件后窗口内温度相对基线温度的最大绝对偏差（°C）；无事件后读数为 null"
+    )
+    max_temp_deviation_ts: dt.datetime | None = Field(
+        None, description="温度最大偏差对应时刻（窗口边界插值或读数时刻；并列取最早）"
+    )
+    max_humidity_deviation: float | None = Field(
+        None, description="事件后窗口内湿度相对基线湿度的最大绝对偏差（%RH）；无事件后读数为 null"
+    )
+    max_humidity_deviation_ts: dt.datetime | None = Field(
+        None, description="湿度最大偏差对应时刻（并列取最早）"
+    )
+    not_recovered_reason: Literal[
+        "no_post_event_data",
+        "not_recovered_within_horizon",
+    ] | None = Field(
+        None,
+        description=(
+            "未恢复原因：no_post_event_data（事件后窗口内没有任何读数）/ "
+            "not_recovered_within_horizon（窗口结束仍未连续满足 hold）；已恢复为 null"
+        ),
+    )
+
+
 class HealthOut(BaseModel):
     status: str
     db: str
